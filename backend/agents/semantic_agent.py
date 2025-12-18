@@ -68,16 +68,9 @@ class SemanticAnalyzer:
     """
     
     def __init__(self):
-        """Initialize the semantic analyzer with embedding model."""
+        """Initialize the semantic analyzer. Model is loaded lazily."""
         self.model = None
-        if EMBEDDINGS_AVAILABLE:
-            try:
-                logger.info("Loading sentence-transformers model: all-MiniLM-L6-v2")
-                self.model = SentenceTransformer('all-MiniLM-L6-v2')
-                logger.info("Model loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load embedding model: {e}")
-                self.model = None
+
     
     def should_skip_file(self, file_path: str) -> bool:
         """
@@ -376,10 +369,16 @@ class SemanticAnalyzer:
             union = intent_words | behavior_words
             return len(intersection) / len(union) if union else 0.5
         
+        # Try to load model if available
+        self._load_model_if_needed()
+
         try:
             # Get embeddings
-            intent_embedding = self.model.encode(intent_text, convert_to_tensor=False)
-            behavior_embedding = self.model.encode(behavior_text, convert_to_tensor=False)
+            if self.model:
+                intent_embedding = self.model.encode(intent_text, convert_to_tensor=False)
+                behavior_embedding = self.model.encode(behavior_text, convert_to_tensor=False)
+            else:
+                raise ImportError("Model not available")
             
             # Compute cosine similarity
             try:
