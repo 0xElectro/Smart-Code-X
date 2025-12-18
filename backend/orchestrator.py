@@ -116,6 +116,7 @@ def run_all_agents(repo_path: str) -> Dict[str, Any]:
 
     # 2) Run IERA on whatever we got (even if some agents failed)
     iera_output = generate_recommendations(
+        repo_path=repo_path,  # <--- ADD THIS LINE
         saa_output=saa_output,
         scaa_output=scaa_output,
         hdva_output=hdva_output
