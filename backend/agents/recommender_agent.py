@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Tuple
 from collections import defaultdict
 
+import requests
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -48,6 +50,123 @@ RECOMMENDATION_CATEGORIES = {
 }
 
 
+def _generate_recommendations_with_gemini(
+    saa_output: Dict[str, Any],
+    scaa_output: Dict[str, Any],
+    hdva_output: Dict[str, Any],
+    api_key: str,
+    model: str = "gemini-2.5-flash",
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Call Gemini API to generate recommendations based on agent outputs.
+
+    This function MUST return a list of recommendation dicts that match the
+    existing IERA output schema so the frontend does not need to change.
+
+    If anything goes wrong (network, parsing, etc.), it returns None so the
+    caller can fall back to the local rule-based engine.
+    """
+    try:
+        # Compact view of inputs to keep prompt size manageable
+        payload_summary = {
+            "SAA": {
+                "issues": saa_output.get("issues", []),
+                "file_stats": saa_output.get("file_stats", {}),
+            },
+            "SCAA": {
+                "issues": scaa_output.get("issues", []),
+                "summary": scaa_output.get("summary", {}),
+            },
+            "HDVA": {
+                "issues": hdva_output.get("issues", []),
+                "summary": hdva_output.get("summary", {}),
+            },
+        }
+
+        system_instructions = (
+            "You are IERA, an Intelligent Enhancement Recommendation Agent for a codebase.\n"
+            "- You receive structured outputs from three analysis agents:\n"
+            "  - SAA (Static Agent) with style, complexity, and security findings.\n"
+            "  - SCAA (Semantic Agent) about intent vs implementation mismatches.\n"
+            "  - HDVA (Hallucination Agent) about incomplete or hallucinated code.\n"
+            "- Your job is to produce *actionable* improvement recommendations.\n"
+            "- You must NOT invent new issues; only base recommendations on the provided data.\n"
+            "- Do NOT modify code, only recommend.\n"
+            "- IMPORTANT: Output MUST be a JSON list of recommendation objects, with this exact structure:\n"
+            "[\n"
+            "  {\n"
+            "    \"file\": \"path/to/file.py\",                # string\n"
+            "    \"function\": \"function_name\" or null,     # string or null\n"
+            "    \"line\": 10 or null,                        # integer or null\n"
+            "    \"category\": \"intent_clarity\" | \"security_hygiene\" | \"maintainability\" | \"api_design\" | \"error_handling\" | \"consistency_style\",\n"
+            "    \"strength\": \"Info\" | \"Suggestion\" | \"Strong Suggestion\",\n"
+            "    \"title\": \"Short human-readable title\",\n"
+            "    \"explanation\": \"1–3 sentences explaining why this recommendation matters.\",\n"
+            "    \"suggestions\": [\"concrete action 1\", \"concrete action 2\"],\n"
+            "    \"evidence\": {\"source\": \"SAA|SCAA|HDVA\", \"details\": \"optional extra context\"}\n"
+            "  },\n"
+            "  ...\n"
+            "]\n"
+            "Return ONLY the JSON list. No markdown, no backticks, no prose around it."
+        )
+
+        user_prompt = (
+            "Here are the analysis results from the three agents as compact JSON.\n"
+            "Generate prioritized recommendations as described above.\n\n"
+            f"{json.dumps(payload_summary, ensure_ascii=False)}"
+        )
+
+        # Official Gemini REST endpoint uses the API key as a query parameter.
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={api_key}"
+        )
+        headers = {
+            "Content-Type": "application/json",
+        }
+        data = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": system_instructions},
+                        {"text": user_prompt},
+                    ]
+                }
+            ]
+        }
+
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+
+        resp_json = response.json()
+        candidates = resp_json.get("candidates", [])
+        if not candidates:
+            logger.warning("Gemini response had no candidates")
+            return None
+
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
+        if not parts:
+            logger.warning("Gemini response had no content parts")
+            return None
+
+        text = parts[0].get("text", "").strip()
+        if not text:
+            logger.warning("Gemini response text is empty")
+            return None
+
+        # Gemini is instructed to return pure JSON; parse it
+        recommendations = json.loads(text)
+
+        if not isinstance(recommendations, list):
+            logger.warning("Gemini output is not a list, falling back")
+            return None
+
+        return recommendations
+
+    except Exception as e:
+        logger.warning(f"Gemini recommendation generation failed: {e}")
+        return None
 class RecommendationGenerator:
     """
     Generates actionable recommendations based on outputs from other agents.
@@ -579,28 +698,40 @@ def generate_recommendations(
     results_folder = Path(results_base_folder) / session_id
     
     # Load Static Agent results
-    saa_output = _load_agent_results(results_folder / "static_agent.json")
+    saa_output = _load_agent_results(results_folder / "static_agent.json") or {}
     
     # Load Semantic Agent results
-    scaa_output = _load_agent_results(results_folder / "semantic_agent.json")
+    scaa_output = _load_agent_results(results_folder / "semantic_agent.json") or {}
     
     # Load Hallucination Agent results
-    hdva_output = _load_agent_results(results_folder / "hallucination_agent.json")
+    hdva_output = _load_agent_results(results_folder / "hallucination_agent.json") or {}
     
-    # Handle None/empty inputs gracefully
-    saa_output = saa_output or {}
-    scaa_output = scaa_output or {}
-    hdva_output = hdva_output or {}
+    # Decide whether to use external Gemini API or local rule-based engine
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    recommendations: List[Dict[str, Any]] = []
+
+    if gemini_api_key:
+        logger.info("GEMINI_API_KEY detected – using Gemini for recommendation generation")
+        gemini_recs = _generate_recommendations_with_gemini(
+            saa_output=saa_output,
+            scaa_output=scaa_output,
+            hdva_output=hdva_output,
+            api_key=gemini_api_key,
+        )
+        if gemini_recs is not None:
+            recommendations = gemini_recs
+        else:
+            logger.warning("Falling back to rule-based recommendations due to Gemini error")
     
-    # Initialize generator
+    if not recommendations:
+        # Fallback or default path: use existing rule-based generator
+        generator = RecommendationGenerator()
+        recommendations = generator.generate_all_recommendations(
+            saa_output, scaa_output, hdva_output
+        )
+    
+    # Build summary (structure must remain the same for frontend)
     generator = RecommendationGenerator()
-    
-    # Generate all recommendations
-    recommendations = generator.generate_all_recommendations(
-        saa_output, scaa_output, hdva_output
-    )
-    
-    # Build summary
     summary = generator.build_summary(recommendations)
     
     # Post-process recommendations to match frontend expectations
