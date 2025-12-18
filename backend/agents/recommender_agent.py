@@ -603,11 +603,32 @@ def generate_recommendations(
     # Build summary
     summary = generator.build_summary(recommendations)
     
-    logger.info(f"IERA generated {len(recommendations)} recommendations")
+    # Post-process recommendations to match frontend expectations
+    final_recommendations = []
+    for rec in recommendations:
+        # Map strength to impact/effort
+        strength = rec.get('strength', 'Info')
+        if strength == 'Strong Suggestion':
+            rec['impact'] = 'High'
+            rec['effort'] = 'Medium'
+        elif strength == 'Suggestion':
+            rec['impact'] = 'Medium'
+            rec['effort'] = 'Low'
+        else:
+            rec['impact'] = 'Low'
+            rec['effort'] = 'Low'
+            
+        # Ensure files is a list
+        if 'file' in rec and 'files' not in rec:
+            rec['files'] = [rec['file']]
+            
+        final_recommendations.append(rec)
+    
+    logger.info(f"IERA generated {len(final_recommendations)} recommendations")
     
     result = {
         "agent": "IERA",
-        "recommendations": recommendations,
+        "recommendations": final_recommendations,
         "summary": summary
     }
     

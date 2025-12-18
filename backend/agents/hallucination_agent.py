@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional, Set
 from collections import defaultdict
+import re
 
 # Add static_agent_files to path to import collect_python_files
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'static_agent_files'))
@@ -524,31 +525,99 @@ class HallucinationDetector:
         if self.should_skip_file(file_path_str):
             return issues
         
-        # Read file
         content = self.read_file_safely(file_path)
         if not content:
             return issues
         
-        # Parse AST
-        tree = self.parse_ast_safely(content, str(file_path))
-        if not tree:
-            return issues
+        if str(file_path).endswith('.py'):
+            # AST Analysis for Python
+            tree = self.parse_ast_safely(content, str(file_path))
+            if not tree:
+                return issues
+            
+            # Build symbol table
+            symbol_table = self.build_symbol_table(tree, file_path_str)
+            self.symbol_tables[file_path_str] = symbol_table
+            
+            # Extract and check usages
+            file_issues = self.extract_usages(tree, symbol_table, file_path_str)
+            issues.extend(file_issues)
+        else:
+            # Heuristic Analysis for other languages
+            heuristic_issues = self._analyze_heuristic_imports(content, file_path_str)
+            issues.extend(heuristic_issues)
         
-        # Build symbol table
-        symbol_table = self.build_symbol_table(tree, file_path_str)
-        self.symbol_tables[file_path_str] = symbol_table
+        return issues
+
+    def _analyze_heuristic_imports(self, content: str, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Analyze non-Python files for missing imports using simple heuristics.
+        """
+        issues = []
+        ext = os.path.splitext(file_path)[1].lower()
         
-        # Extract and check usages
-        file_issues = self.extract_usages(tree, symbol_table, file_path_str)
+        # C++ Heuristics
+        if ext in {'.cpp', '.h', '.hpp', '.c', '.cc'}:
+            # Check for std::cout usage without <iostream>
+            if 'std::cout' in content and '#include <iostream>' not in content and '#include "iostream"' not in content:
+                issues.append({
+                    'file': file_path,
+                    'line': 1,
+                    'symbol': 'std::cout',
+                    'issue': 'Usage of std::cout found but <iostream> not included',
+                    'type': 'missing_include',
+                    'severity': 'Medium'
+                })
+            # Check for std::vector without <vector>
+            if 'std::vector' in content and '#include <vector>' not in content:
+                issues.append({
+                    'file': file_path,
+                    'line': 1,
+                    'symbol': 'std::vector',
+                    'issue': 'Usage of std::vector found but <vector> not included',
+                    'type': 'missing_include',
+                    'severity': 'Medium'
+                })
         
-        # Deduplicate issues (same symbol on same line)
-        seen = set()
-        for issue in file_issues:
-            key = (issue['file'], issue['line'], issue['symbol'])
-            if key not in seen:
-                seen.add(key)
-                issues.append(issue)
-        
+        # JavaScript/TypeScript Heuristics
+        elif ext in {'.js', '.jsx', '.ts', '.tsx'}:
+            # React Hooks
+            hooks = ['useState', 'useEffect', 'useContext', 'useReducer', 'useCallback', 'useMemo', 'useRef']
+            has_react_import = bool(re.search(r'import\s+.*react', content, re.IGNORECASE))
+            
+            for hook in hooks:
+                if re.search(r'\b' + hook + r'\b', content) and not has_react_import:
+                     # Check if hook is imported specifically
+                     if not re.search(r'import\s+.*\{[^}]*'+hook+r'[^}]*\}.*', content):
+                        issues.append({
+                            'file': file_path,
+                            'line': 1,
+                            'symbol': hook,
+                            'issue': f'Usage of {hook} found but not imported from React',
+                            'type': 'missing_import',
+                            'severity': 'Medium'
+                        })
+                        
+        # Java Heuristics
+        elif ext in {'.java'}:
+             # Check for List/Map/Set without java.util
+            collections = ['List', 'Map', 'Set', 'ArrayList', 'HashMap', 'HashSet']
+            has_util_import = 'import java.util' in content
+            
+            if not has_util_import:
+                for col in collections:
+                     # Check usage (e.g., "List<String> x")
+                     if re.search(r'\b' + col + r'<', content):
+                        issues.append({
+                            'file': file_path,
+                            'line': 1,
+                            'symbol': col,
+                            'issue': f'Usage of {col} found but java.util not imported',
+                            'type': 'missing_import',
+                            'severity': 'Medium'
+                        })
+                        break
+                        
         return issues
     
     def analyze_repository_with_session(
@@ -584,12 +653,13 @@ class HallucinationDetector:
                 }
             }
         
-        # Get all Python files from temp folder
+        # Get all files from temp folder
         collected_files = [str(f.relative_to(temp_folder_path)) 
-                          for f in temp_folder_path.rglob("*.py")]
+                          for f in temp_folder_path.rglob("*")
+                          if f.is_file() and not f.name.startswith('.')]
         
         if not collected_files:
-            logger.warning("No Python files found in temp folder")
+            logger.warning("No files found in temp folder")
             return {
                 "agent": "HDVA",
                 "session_id": session_id,
@@ -601,7 +671,7 @@ class HallucinationDetector:
                 }
             }
         
-        logger.info(f"Found {len(collected_files)} Python files")
+        logger.info(f"Found {len(collected_files)} files")
         
         # Analyze each file
         all_issues = []

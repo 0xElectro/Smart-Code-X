@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
 import hashlib
+import re
 
 # Use package-relative import so this works when called via orchestrator
 from .static_agent_files.collect_python_files import collect_python_files
@@ -49,19 +50,25 @@ class StaticCodeAnalyzer:
             logger.error(f"Temp folder does not exist: {self.temp_folder}")
             return self._build_summary()
         
-        # Get all Python files
-        python_files = list(self.temp_folder.rglob("*.py"))
+        # Get all files (not just Python)
+        all_files = [
+            f for f in self.temp_folder.rglob("*") 
+            if f.is_file() and not f.name.startswith('.')
+        ]
         
-        if not python_files:
-            logger.warning("No Python files found in temp folder")
+        if not all_files:
+            logger.warning("No files found in temp folder")
             return self._build_summary()
         
-        logger.info(f"Found {len(python_files)} Python files to analyze")
+        logger.info(f"Found {len(all_files)} files to analyze")
         
         # Analyze each file
-        for file_path in python_files:
+        for file_path in all_files:
             logger.info(f"Analyzing: {file_path}")
-            self._analyze_single_file(file_path)
+            if file_path.suffix == '.py':
+                self._analyze_single_file(file_path)
+            else:
+                self._analyze_generic_file(file_path)
         
         # Normalize, deduplicate, and build summary
         self._normalize_issues()
@@ -122,6 +129,80 @@ class StaticCodeAnalyzer:
 
         # Step 7: Run radon
         self._run_radon(file_path)
+
+    def _analyze_generic_file(self, file_path: Path) -> None:
+        """
+        Analyze a non-Python file for basic issues (secrets, TODOs).
+        """
+        file_str = str(file_path)
+        self.file_stats[file_str] = {
+            'syntax_error': False,
+            'ast_issues': 0,
+            'pylint_issues': 0,
+            'bandit_issues': 0,
+            'metrics': {'loc': 0, 'blank': 0, 'comment': 0},
+            'radon_metrics': {}
+        }
+        
+        # Read file
+        try:
+            content = self._read_file_safely(file_path)
+            lines = content.splitlines()
+            metrics = self.file_stats[file_str]['metrics']
+            metrics['loc'] = len(lines)
+            metrics['blank'] = sum(1 for line in lines if not line.strip())
+            # Rough comment count (language dependent, skipping complexity here)
+            metrics['comment'] = 0 
+        except Exception as e:
+            logger.error(f"Failed to read {file_path}: {e}")
+            self._add_issue(file_str, 'read_error', str(e), 1, 'error')
+            return
+
+        # Scan for TODO/FIXME
+        self._scan_todo_fixme(file_str, content)
+        
+        # Scan for secrets
+        self._scan_secrets(file_str, content)
+        
+        # Scan for suspicious keywords
+        self._scan_suspicious_keywords(file_str, content)
+
+    def _scan_secrets(self, file_path: str, content: str) -> None:
+        """Scan for potential secrets using regex."""
+        # Simple patterns for common secrets
+        patterns = [
+            (r'(?i)(password|passwd|pwd)\s*[=:]\s*[\'"](?P<secret>[^\'"]+)[\'"]', 'possible_password'),
+            (r'(?i)(api[_-]?key|access[_-]?token|secret[_-]?key)\s*[=:]\s*[\'"](?P<secret>[^\'"]+)[\'"]', 'possible_api_key'),
+            (r'(?i)bearer\s+[a-zA-Z0-9\-\._~+/]+=*', 'possible_bearer_token'),
+        ]
+        
+        for idx, line in enumerate(content.splitlines(), start=1):
+            for pattern, issue_type in patterns:
+                match = re.search(pattern, line)
+                if match:
+                    # Don't log the actual secret, just the finding
+                    self._add_issue(
+                        file_path,
+                        issue_type,
+                        f"Potential secret detected: {issue_type} (line {idx})",
+                        idx,
+                        'High'
+                    )
+
+    def _scan_suspicious_keywords(self, file_path: str, content: str) -> None:
+        """Scan for suspicious dangerous keywords."""
+        keywords = ['eval(', 'exec(', 'system(', 'shell=True']
+        
+        for idx, line in enumerate(content.splitlines(), start=1):
+            for kw in keywords:
+                if kw in line:
+                     self._add_issue(
+                        file_path,
+                        'suspicious_keyword',
+                        f"Suspicious usage of '{kw}' detected",
+                        idx,
+                        'Medium'
+                    )
 
     def _scan_todo_fixme(self, file_path: str, content: str) -> None:
         """

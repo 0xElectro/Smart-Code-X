@@ -110,3 +110,12 @@ The frontend is a modern React application styled with Tailwind CSS and Shadcn/U
 2.  Login via the Sidebar.
 3.  Upload your avatar in the Profile settings.
 4.  View your code reviews on the dashboard.
+
+
+cd backend
+source venv/bin/activate
+python main.py
+
+# Assuming you are in the project root
+cd backend
+./venv/bin/python main.py

@@ -23,6 +23,18 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Import firebase_config
+try:
+    import firebase_config
+except ImportError:
+    # Fallback if running as script from wrong dir, though unlikely in this setup
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    import firebase_config
+
+import shutil
+import tempfile
+
+
 # ---- Import your agents ----
 from agents.static_agent import StaticAnalysisAgent
 from agents.semantic_agent import analyze_semantic
@@ -142,6 +154,74 @@ def run_hdva(repo_path: str):
         return {"agent": "HDVA", "issues": [], "summary": {}}, f"HDVA error: {e}"
 
 
+
+# ---------- Cloud Analysis Helpers ----------
+
+def download_from_cloud(cloud_path: str, local_destination: str):
+    """
+    Downloads a folder (prefix) from Firebase Storage to a local destination.
+    cloud_path: e.g., "projects/user123/proj456/"
+    local_destination: e.g., "/tmp/somerandomdir"
+    """
+    bucket = firebase_config.get_storage_bucket()
+    if not bucket:
+        raise Exception("Storage bucket not configured")
+
+    blobs = list(bucket.list_blobs(prefix=cloud_path))
+    
+    if not blobs:
+        logger.warning(f"No files found in cloud path: {cloud_path}")
+        return
+
+    logger.info(f"Downloading {len(blobs)} files from {cloud_path} to {local_destination}...")
+    
+    for blob in blobs:
+        # blob.name might be "projects/user123/proj456/backend/main.py"
+        # We want to remove the "projects/user123/proj456/" prefix for local structure
+        # ensuring we handle trailing slashes correctly
+        relative_path = blob.name[len(cloud_path):]
+        if relative_path.startswith("/"):
+            relative_path = relative_path[1:]
+            
+        if not relative_path: # It's the folder itself
+            continue
+
+        local_file_path = os.path.join(local_destination, relative_path)
+        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+        blob.download_to_filename(local_file_path)
+    
+    logger.info(f"Download complete.")
+
+def run_analysis_from_cloud(cloud_path: str) -> Dict[str, Any]:
+    """
+    Downloads source from cloud_path and runs run_all_agents on it.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        logger.info(f"Created temp dir for cloud analysis: {temp_dir}")
+        
+        try:
+            download_from_cloud(cloud_path, temp_dir)
+            
+            # Check if download actually got files
+            if not os.listdir(temp_dir):
+                 return {
+                    "status": "error",
+                    "message": f"No files downloaded from {cloud_path}"
+                }
+
+            # Run analysis
+            result = run_all_agents(temp_dir)
+            return result
+
+        except Exception as e:
+            logger.error(f"Error during cloud analysis: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": f"Analysis failed: {str(e)}"
+            }
+
 # ---------- Main Orchestrator Function ----------
 
 def run_all_agents(repo_path: str) -> Dict[str, Any]:
@@ -163,20 +243,20 @@ def run_all_agents(repo_path: str) -> Dict[str, Any]:
     base_temp_folder = os.path.join("agents", "temp")
     base_results_folder = os.path.join("agents", "results")
     
-    logger.info(f"Collecting Python files from: {repo_path}")
+    logger.info(f"Collecting files from: {repo_path}")
     collected_files, collection_stats, session_id = collect_python_files(
         repo_path, 
         base_temp_folder=base_temp_folder
     )
     
     logger.info(f"Session ID: {session_id}")
-    logger.info(f"Collected {len(collected_files)} Python files")
+    logger.info(f"Collected {len(collected_files)} files")
     logger.info(f"Files stored in: {base_temp_folder}/{session_id}/")
     
     if not collected_files:
         return {
             "status": "error",
-            "message": "No Python files found in the repository"
+            "message": "No supported source files found in the repository"
         }
     
     # 1) Run all analysis agents with the SAME session_id

@@ -20,3 +20,10 @@ Thumbs.db
 backend/serviceAccountKey.json
 # Editor configs
 .vscode/
+
+# Runtime / generated data (Smart-Code-X)
+backend/agents/temp/
+backend/agents/results/
+
+# Uploads / archives
+*.zip

@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 def collect_python_files(directory_path: str, base_temp_folder: str = "temp") -> Tuple[List[str], Dict, str]:
     """
-    Walk through a directory and all subdirectories to collect all .py files.
+    Walk through a directory and all subdirectories to collect project source files.
     Copy collected files to a temp folder with unique session ID while maintaining relative structure.
+    
+    Now supports multiple languages (Python, JS, TS, C++, Java, Go, Rust, etc.)
     
     Args:
         directory_path: Root directory path to start searching
@@ -22,21 +24,37 @@ def collect_python_files(directory_path: str, base_temp_folder: str = "temp") ->
     
     Returns:
         Tuple containing:
-            - List of collected Python file paths (relative to source directory)
+            - List of collected file paths (relative to source directory)
             - Dictionary with statistics
             - Session ID (unique identifier for this collection run)
-    
-    Edge Cases Handled:
-        - No Python files: Returns empty list
-        - Permission denied: Skips file, logs warning
-        - Broken encoding: Reads with errors='ignore'
     """
     
     # Generate unique session ID
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     
     # Directories to skip
-    SKIP_DIRS = {'.git', '__pycache__', '.venv', 'node_modules'}
+    SKIP_DIRS = {'.git', '__pycache__', '.venv', 'node_modules', 'dist', 'build', '.idea', '.vscode'}
+    
+    # Extensions to collect
+    ALLOWED_EXTENSIONS = {
+        '.py', '.pyw',           # Python
+        '.js', '.jsx', '.ts', '.tsx',  # JavaScript/TypeScript
+        '.c', '.cpp', '.h', '.hpp',    # C/C++
+        '.java',                 # Java
+        '.go',                   # Go
+        '.rs',                   # Rust
+        '.rb',                   # Ruby
+        '.php',                  # PHP
+        '.cs',                   # C#
+        '.swift',                # Swift
+        '.kt', '.kts',           # Kotlin
+        '.scala',                # Scala
+        '.html', '.css',         # Web
+        '.sh', '.bash',          # Shell
+        '.txt', '.md', '.json',  # Data/Text
+        '.sql',                  # SQL
+        '.env', '.yml', '.yaml', '.ini', '.xml' # Config/Secrets
+    }
     
     # Initialize results
     collected_files = []
@@ -81,9 +99,11 @@ def collect_python_files(directory_path: str, base_temp_folder: str = "temp") ->
         # Filter out directories to skip (modify dirs in-place to prevent os.walk from entering them)
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         
-        # Process Python files
+        # Process files
         for file in files:
-            if file.endswith('.py'):
+            # Check extension
+            _, ext = os.path.splitext(file)
+            if ext.lower() in ALLOWED_EXTENSIONS:
                 source_file = Path(root) / file
                 
                 # Calculate relative path from source directory
@@ -129,7 +149,7 @@ def collect_python_files(directory_path: str, base_temp_folder: str = "temp") ->
                     # Successfully collected
                     collected_files.append(str(relative_path))
                     stats['total_files'] += 1
-                    logger.info(f"Collected: {relative_path}")
+                    # logger.info(f"Collected: {relative_path}") # Reduce spam for large repos
                     
                 except PermissionError:
                     # Handle permission denied
@@ -148,15 +168,15 @@ def collect_python_files(directory_path: str, base_temp_folder: str = "temp") ->
     logger.info(f"\n{'='*50}")
     logger.info(f"Collection Summary:")
     logger.info(f"Session ID: {session_id}")
-    logger.info(f"Total Python files collected: {stats['total_files']}")
+    logger.info(f"Total files collected: {stats['total_files']}")
     logger.info(f"Skipped (permission denied): {stats['skipped_permission']}")
     logger.info(f"Skipped (encoding issues): {stats['skipped_encoding']}")
     logger.info(f"Destination: {temp_path.absolute()}")
     logger.info(f"{'='*50}\n")
     
-    # Handle edge case: No Python files found
+    # Handle edge case: No files found
     if stats['total_files'] == 0:
-        logger.info("No Python files found in the directory.")
+        logger.info("No supported source files found in the directory.")
     
     return collected_files, stats, session_id
 
@@ -164,7 +184,7 @@ def collect_python_files(directory_path: str, base_temp_folder: str = "temp") ->
 # Example usage
 if __name__ == "__main__":
     print("="*60)
-    print("Python File Collector")
+    print("Multi-Language File Collector")
     print("="*60)
     
     # Get directory path from user

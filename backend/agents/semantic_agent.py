@@ -321,7 +321,6 @@ class SemanticAnalyzer:
         # Imports used
         if behavior['imports_used']:
             parts.extend(sorted(behavior['imports_used']))
-        
         # String literals (only meaningful ones)
         if behavior['string_literals']:
             # Take first few meaningful strings
@@ -520,7 +519,7 @@ class SemanticAnalyzer:
         
         return issue
     
-    def analyze_file(self, file_path: Path) -> List[Dict[str, Any]]:
+    def analyze_file(self, file_path: Path, relative_path: str = None) -> List[Dict[str, Any]]:
         """
         Analyze a single Python file for semantic issues.
         
@@ -531,6 +530,10 @@ class SemanticAnalyzer:
         
         # Skip test files
         if self.should_skip_file(str(file_path)):
+            return issues
+
+        # Skip non-Python files
+        if not str(file_path).endswith('.py'):
             return issues
         
         # Read file safely

@@ -14,6 +14,11 @@ import urllib.parse
 
 import auth
 import firebase_config
+import orchestrator
+import zipfile
+import shutil
+import tempfile
+
 
 # Load environment variables
 load_dotenv()
@@ -270,9 +275,124 @@ async def delete_review(
     if review_data.get('user_id') != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this review")
         
+
     # Delete
     review_ref.delete()
     return {"status": "success"}
+
+# --- Analysis Routes ---
+
+@app.post("/analyze/upload-zip")
+async def analyze_uploaded_zip(
+    file: UploadFile = File(...),
+    current_user: auth.User = Depends(get_current_user)
+):
+    path_to_zip = ""
+    extract_folder = ""
+    
+    try:
+        # Check if file is zip
+        if not file.filename.endswith(".zip"):
+            raise HTTPException(status_code=400, detail="Only ZIP files are allowed")
+
+        # 1. Save ZIP locally to temp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+            path_to_zip = tmp_zip.name
+            shutil.copyfileobj(file.file, tmp_zip)
+
+        # 2. Extract ZIP
+        extract_folder = tempfile.mkdtemp()
+        with zipfile.ZipFile(path_to_zip, 'r') as zip_ref:
+            zip_ref.extractall(extract_folder)
+
+        # 3. Upload extracted files to Firebase Storage
+        bucket = firebase_config.get_storage_bucket()
+        if not bucket:
+             raise HTTPException(status_code=500, detail="Storage not configured")
+        
+        project_id = str(uuid.uuid4())
+        # Cloud path: projects/{user_id}/{project_id}/...
+        cloud_base_path = f"projects/{current_user.id}/{project_id}/"
+        
+        print(f"DEBUG: Uploading extracted files to {cloud_base_path}")
+        
+        files_uploaded = 0
+        for root, dirs, files in os.walk(extract_folder):
+            for filename in files:
+                local_path = os.path.join(root, filename)
+                # Relative path in the zip
+                relative_path = os.path.relpath(local_path, extract_folder)
+                # Cloud blob path
+                blob_path = f"{cloud_base_path}{relative_path}"
+                
+                blob = bucket.blob(blob_path)
+                blob.upload_from_filename(local_path)
+                files_uploaded += 1
+        
+        print(f"DEBUG: Uploaded {files_uploaded} files to cloud.")
+
+        # 4. Trigger Analysis via Orchestrator (Cloud Based)
+        # The orchestrator will download from cloud_base_path and analyze
+        print(f"DEBUG: Triggering orchestrator for {cloud_base_path}")
+        try:
+            analysis_result = orchestrator.run_analysis_from_cloud(cloud_base_path)
+        except Exception as e:
+             # Log full trace
+             import traceback
+             traceback.print_exc()
+             raise HTTPException(status_code=500, detail=f"Orchestrator failed: {str(e)}")
+
+        # 5. Store Review Result in Firestore
+        # Convert analysis result to match Review schema if needed
+        # For now, we return the raw orchestrator result or save it
+        
+        # Determine total issues
+        total_issues = 0
+        issues = []
+        
+        # Example structure from orchestrator:
+        # { "agents": { "SAA": [issues...], "SCAA": {...}, ... } }
+        
+        # Flatten SAA issues for simple count
+        if "agents" in analysis_result and "SAA" in analysis_result["agents"]:
+            saa_issues = analysis_result["agents"]["SAA"]
+            if isinstance(saa_issues, list):
+                total_issues += len(saa_issues)
+                issues.extend(saa_issues)
+        
+        # Create Review Record
+        db = firebase_config.get_firestore_db()
+        reviews_ref = db.collection('reviews')
+        
+        new_review = {
+            "user_id": current_user.id,
+            "project_id": project_id,
+            "file_name": file.filename, # Using zip name as ref
+            "total_issues": total_issues,
+            "issues": issues, # Stores SAA issues mainly
+            "raw_analysis": analysis_result, # Store full detailed result
+            "created_at": datetime.utcnow().isoformat(),
+            "cloud_path": cloud_base_path
+        }
+        
+        update_time, doc_ref = reviews_ref.add(new_review)
+        new_review['id'] = doc_ref.id
+        
+        return new_review
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"DEBUG: Upload/Analyze Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Cleanup local temps
+        if path_to_zip and os.path.exists(path_to_zip):
+            os.remove(path_to_zip)
+        if extract_folder and os.path.exists(extract_folder):
+            shutil.rmtree(extract_folder)
 
 @app.get("/")
 def read_root():
